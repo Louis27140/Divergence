@@ -1,0 +1,19 @@
+chat.<IP_ADRESS>.nip.io {
+  encode gzip zstd
+
+  handle_path /api/* {
+    reverse_proxy back:3000
+  }
+
+  handle /socket.io/* {
+    reverse_proxy back:3000
+  }
+
+  handle_path /livekit/* {
+    reverse_proxy livekit:7880
+  }
+
+  handle {
+    reverse_proxy front:5173
+  }
+}

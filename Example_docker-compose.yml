@@ -1,0 +1,94 @@
+services:
+  caddy:
+    image: caddy:2
+    depends_on:
+      - front
+      - back
+      - livekit
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+  turn:
+    image: coturn/coturn:latest
+    ports:
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+      - "49160-49200:49160-49200/udp"
+    command:
+    - -n
+    - --log-file=stdout
+    - --listening-ip=0.0.0.0
+    - --external-ip=<IP_ADDRESS>
+    - --listening-port=3478
+    - --min-port=49160
+    - --max-port=49200
+    - --fingerprint
+    - --lt-cred-mech
+    - --user=turnuser:turnpass
+    - --realm=turn.<IP_ADDRESS>.nip.io
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: dbuser
+      POSTGRES_PASSWORD: dbpass
+      POSTGRES_DB: app
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@local.io
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    depends_on:
+      - db
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+
+  back:
+    build: ./back
+    environment:
+      DATABASE_URL: postgres://dbuser:dbpass@db:5432/app
+    depends_on:
+      - db
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./back:/app
+      - /app/node_modules
+    command: npm run dev
+
+  front:
+    build: ./front
+    depends_on:
+      - back
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./front:/app
+      - /app/node_modules
+    command: npm run dev -- --host 0.0.0.0
+
+  livekit:
+    image: livekit/livekit-server:latest
+    command: ["--config", "/livekit.yaml"]
+    volumes:
+      - ./livekit.yaml:/livekit.yaml:ro
+    ports:
+      - "7880:7880"
+      - "7881:7881/udp"
+      - "7882:7882"
+
+volumes:
+  pgdata:
+  pgadmin_data:
+  caddy_data:
+  caddy_config:

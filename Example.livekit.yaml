@@ -1,0 +1,21 @@
+port: 7880
+rtc:
+  udp_port: 7881
+  tcp_port: 7882
+  node_ip: 192.168.1.40
+  use_external_ip: true
+  stun_servers:
+    - stun.l.google.com:19302
+  turn_servers:
+    - host: IP_ADDRESS
+      port: 3478
+      protocol: udp
+      username: turnuser
+      credential: turnpass
+    - host: IP_ADDRESS
+      port: 3478
+      protocol: tcp
+      username: turnuser
+      credential: turnpass
+keys:
+  devkey: devsecret

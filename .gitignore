@@ -1,0 +1,10 @@
+livekit.yaml
+docker-compose.yml
+
+caddy/Caddyfile
+
+front/node_modules
+front/.env.local
+
+back/node_modules
+back/.ENV

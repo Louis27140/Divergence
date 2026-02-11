@@ -1,17 +1,20 @@
-import React from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { socket } from "./socket";
+import { VoiceButton } from "./components/VoiceButton";
 
-type Channel = { id: string; name: string };
+type ChannelType = "text" | "voice" | "both";
+type Channel = { id: string; name: string; type: ChannelType };
+
 type Message = {
   id: string;
   channel_id: string;
   author_id: string;
+  author_username: string;
   content: string;
   created_at: string;
 };
+const API = import.meta.env.VITE_API_URL;
 
-const API = import.meta.env.VITE_API_URL ?? "http://localhost:3000";
 
 async function api<T>(path: string, opts: RequestInit = {}, token?: string): Promise<T> {
   const res = await fetch(`${API}${path}`, {
@@ -19,9 +22,10 @@ async function api<T>(path: string, opts: RequestInit = {}, token?: string): Pro
     headers: {
       "Content-Type": "application/json",
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(opts.headers ?? {})
-    }
+      ...(opts.headers ?? {}),
+    },
   });
+
   if (!res.ok) {
     const txt = await res.text();
     throw new Error(`${res.status} ${txt}`);
@@ -31,17 +35,26 @@ async function api<T>(path: string, opts: RequestInit = {}, token?: string): Pro
 
 export default function App() {
   const [token, setToken] = useState<string>("");
-  const [username, setUsername] = useState("louis");
-  const [password, setPassword] = useState("123456");
+
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
 
   const [channels, setChannels] = useState<Channel[]>([]);
   const [selected, setSelected] = useState<Channel | null>(null);
+
   const [messages, setMessages] = useState<Message[]>([]);
   const [content, setContent] = useState("");
 
+  // ✅ voice presence state (INSIDE App)
+  const [voiceUsers, setVoiceUsers] = useState<{ username: string }[]>([]);
+
+  // Create channel UI
+  const [newChannelName, setNewChannelName] = useState("");
+  const [newChannelType, setNewChannelType] = useState<ChannelType>("both");
+
   const joinedRef = useRef<string | null>(null);
 
-  // socket listener
+  // messages socket listener
   useEffect(() => {
     function onNewMessage(msg: Message) {
       if (selected && msg.channel_id === selected.id) {
@@ -54,10 +67,24 @@ export default function App() {
     };
   }, [selected]);
 
+  // voice presence listener
+  useEffect(() => {
+    function onVoiceState(payload: { channelId: string; users: { username: string }[] }) {
+      if (selected && payload.channelId === selected.id) {
+        setVoiceUsers(payload.users);
+      }
+    }
+
+    socket.on("voice:state", onVoiceState);
+    return () => {
+      socket.off("voice:state", onVoiceState);
+    };
+  }, [selected]);
+
   async function login() {
     const res = await api<{ token: string }>("/auth/login", {
       method: "POST",
-      body: JSON.stringify({ username, password })
+      body: JSON.stringify({ username, password }),
     });
     setToken(res.token);
   }
@@ -73,37 +100,70 @@ export default function App() {
     setMessages(res.messages);
   }
 
+  async function createChannel() {
+    if (!token) return;
+    const name = newChannelName.trim();
+    if (!name) return;
+
+    const res = await api<{ channel: Channel }>(
+      "/channels",
+      {
+        method: "POST",
+        body: JSON.stringify({ name, type: newChannelType }),
+      },
+      token
+    );
+
+    setChannels((prev) => [res.channel, ...prev]);
+    setSelected(res.channel);
+    setNewChannelName("");
+    setNewChannelType("both");
+  }
+
   useEffect(() => {
     if (!token) return;
     loadChannels(token).catch(console.error);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
 
-  // when selecting a channel: fetch + join room
+  // selecting a channel: fetch + join socket room
   useEffect(() => {
     if (!token || !selected) return;
 
-    loadMessages(selected.id, token).catch(console.error);
+    // messages only if channel supports text
+    if (selected.type === "text" || selected.type === "both") {
+      loadMessages(selected.id, token).catch(console.error);
+    } else {
+      setMessages([]);
+    }
 
-    // leave previous
+    // reset voice users display on channel switch (optional)
+    setVoiceUsers([]);
+
+    // leave previous socket room
     if (joinedRef.current) socket.emit("leave", { channelId: joinedRef.current });
-    // join new
+    // join new socket room
     socket.emit("join", { channelId: selected.id });
     joinedRef.current = selected.id;
   }, [selected, token]);
 
   async function sendMessage() {
     if (!token || !selected) return;
+    if (!(selected.type === "text" || selected.type === "both")) return;
+
     const text = content.trim();
     if (!text) return;
 
-    // POST message (DB + broadcast)
-    await api(`/channels/${selected.id}/messages`, {
-      method: "POST",
-      body: JSON.stringify({ content: text })
-    }, token);
+    await api(
+      `/channels/${selected.id}/messages`,
+      {
+        method: "POST",
+        body: JSON.stringify({ content: text }),
+      },
+      token
+    );
 
     setContent("");
-    // pas besoin d'ajouter localement: tu vas le recevoir via socket
   }
 
   const authed = useMemo(() => Boolean(token), [token]);
@@ -118,20 +178,61 @@ export default function App() {
             <input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="password" type="password" />
             <button onClick={login}>Login</button>
           </div>
-          <p style={{ opacity: 0.7, marginTop: 12 }}>
-            UI moche, mais ça cause. 😄
-          </p>
         </div>
       ) : (
         <>
-          <div style={{ width: 220 }}>
+          <div style={{ width: 280 }}>
+            {/* Voice area */}
+            {selected && (selected.type === "voice" || selected.type === "both") && (
+              <div style={{ marginBottom: 10, border: "1px solid #ddd", padding: 8 }}>
+                <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 6 }}>
+                  Voice presence: {voiceUsers.length}
+                </div>
+                {voiceUsers.length > 0 && (
+                  <div style={{ fontSize: 13, marginBottom: 8 }}>
+                    {voiceUsers.map((u, i) => (
+                      <div key={`${u.username}-${i}`}>• {u.username}</div>
+                    ))}
+                  </div>
+                )}
+
+                {/* ✅ pass channelId + username so VoiceButton can emit join/leave */}
+                <VoiceButton key={selected.id} channelId={selected.id} username={username} token={token} />
+              </div>
+            )}
+
             <h3>Channels</h3>
-            <button
-              onClick={() => loadChannels(token).catch(console.error)}
-              style={{ width: "100%", marginBottom: 8 }}
-            >
+
+            {/* Create channel */}
+            <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
+              <input
+                value={newChannelName}
+                onChange={(e) => setNewChannelName(e.target.value)}
+                placeholder="New channel name"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") createChannel().catch(console.error);
+                }}
+              />
+
+              <div style={{ display: "flex", gap: 6 }}>
+                <button onClick={() => setNewChannelType("text")} style={{ flex: 1, background: newChannelType === "text" ? "#eee" : "white" }}>
+                  Text
+                </button>
+                <button onClick={() => setNewChannelType("voice")} style={{ flex: 1, background: newChannelType === "voice" ? "#eee" : "white" }}>
+                  Voice
+                </button>
+                <button onClick={() => setNewChannelType("both")} style={{ flex: 1, background: newChannelType === "both" ? "#eee" : "white" }}>
+                  Both
+                </button>
+              </div>
+
+              <button onClick={() => createChannel().catch(console.error)}>Create</button>
+            </div>
+
+            <button onClick={() => loadChannels(token).catch(console.error)} style={{ width: "100%", marginBottom: 8 }}>
               Refresh
             </button>
+
             <div style={{ display: "grid", gap: 6 }}>
               {channels.map((c) => (
                 <button
@@ -141,10 +242,10 @@ export default function App() {
                     textAlign: "left",
                     padding: 8,
                     border: "1px solid #ccc",
-                    background: selected?.id === c.id ? "#eee" : "white"
+                    background: selected?.id === c.id ? "#eee" : "white",
                   }}
                 >
-                  #{c.name}
+                  #{c.name} <span style={{ opacity: 0.6 }}>({c.type})</span>
                 </button>
               ))}
             </div>
@@ -153,18 +254,23 @@ export default function App() {
           <div style={{ flex: 1 }}>
             <h3>{selected ? `#${selected.name}` : "Select a channel"}</h3>
 
-            <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-              <input
-                value={content}
-                onChange={(e) => setContent(e.target.value)}
-                placeholder="Message..."
-                style={{ flex: 1 }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") sendMessage().catch(console.error);
-                }}
-              />
-              <button onClick={() => sendMessage().catch(console.error)}>Send</button>
-            </div>
+            {/* Message composer only for text/both */}
+            {selected && (selected.type === "text" || selected.type === "both") ? (
+              <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                <input
+                  value={content}
+                  onChange={(e) => setContent(e.target.value)}
+                  placeholder="Message..."
+                  style={{ flex: 1 }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") sendMessage().catch(console.error);
+                  }}
+                />
+                <button onClick={() => sendMessage().catch(console.error)}>Send</button>
+              </div>
+            ) : (
+              <div style={{ opacity: 0.7, marginBottom: 8 }}>Voice-only channel.</div>
+            )}
 
             <div style={{ border: "1px solid #ddd", padding: 8, minHeight: 360 }}>
               {messages.length === 0 ? (
@@ -173,7 +279,7 @@ export default function App() {
                 messages.map((m) => (
                   <div key={m.id} style={{ padding: "6px 0", borderBottom: "1px solid #eee" }}>
                     <div style={{ fontSize: 12, opacity: 0.7 }}>
-                      {new Date(m.created_at).toLocaleString()}
+                      {m.author_username} • {new Date(m.created_at).toLocaleString()}
                     </div>
                     <div>{m.content}</div>
                   </div>
