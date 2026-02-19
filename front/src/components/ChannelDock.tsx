@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { Channel, VoiceUser } from "../types";
+import { ChannelTab } from "./ChannelTab";
 import { CreatePopover } from "./CreatePopover";
 
 type ChannelDockProps = {
@@ -10,12 +11,6 @@ type ChannelDockProps = {
   onSelect: (channel: Channel) => void;
   onOpen: (channel: Channel) => void;
   onCreated: (channel: Channel) => void;
-};
-
-const DOT_CLASS: Record<string, string> = {
-  text: "m-dock__tab-dot--text",
-  voice: "m-dock__tab-dot--voice",
-  both: "m-dock__tab-dot--both",
 };
 
 export function ChannelDock({
@@ -34,22 +29,17 @@ export function ChannelDock({
       <div className="m-dock__tabs">
         {channels.map((ch) => {
           const voiceUsers = voiceUsersByChannel[ch.id] ?? [];
-          const hasVoice = ch.type === "voice" || ch.type === "both";
           const isActive = selected?.id === ch.id;
 
           return (
-            <button
+            <ChannelTab
               key={ch.id}
-              className={`m-dock__tab ${isActive ? "m-dock__tab--active" : ""}`}
-              onClick={() => onSelect(ch)}
-              onDoubleClick={() => onOpen(ch)}
-            >
-              <span className={`m-dock__tab-dot ${DOT_CLASS[ch.type] ?? ""}`} />
-              <span className="m-dock__tab-name">{ch.name}</span>
-              {hasVoice && voiceUsers.length > 0 && (
-                <span className="m-dock__voice-count">{voiceUsers.length}</span>
-              )}
-            </button>
+              channel={ch}
+              isActive={isActive}
+              voiceCount={voiceUsers.length}
+              onSelect={onSelect}
+              onOpen={onOpen}
+            />
           );
         })}
       </div>

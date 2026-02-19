@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
+import { AppTopbar } from "./components/AppTopbar";
 import { ChannelDock } from "./components/ChannelDock";
 import { LoginScreen } from "./components/LoginScreen";
 import { MessageFeed } from "./components/MessageFeed";
 import { VoiceWidget } from "./components/VoiceWidget";
 import { socket } from "./socket";
 import type { Channel, VoiceUser } from "./types";
+import { isVoiceCapableChannel } from "./utils/channel";
 
 export default function App() {
   const [token, setToken] = useState("");
@@ -132,10 +134,8 @@ export default function App() {
 
   function handleChannelVoiceOpen(ch: Channel) {
     setSelected(ch);
-    if (ch.type === "voice" || ch.type === "both") {
+    if (isVoiceCapableChannel(ch)) {
       setActiveVoiceChannel(ch);
-    }
-    if (ch.type === "voice" || ch.type === "both") {
       setVoiceConnectChannelId(ch.id);
       setVoiceConnectTrigger((prev) => prev + 1);
     }
@@ -183,19 +183,7 @@ export default function App() {
     return <LoginScreen onLogin={handleLogin} />;
   }
 
-  const voiceChannel =
-    activeVoiceChannel ??
-    (selected && (selected.type === "voice" || selected.type === "both")
-      ? selected
-      : null);
-
-  const typeLabel = selected
-    ? selected.type === "text"
-      ? "text"
-      : selected.type === "voice"
-        ? "voice"
-        : "text + voice"
-    : "";
+  const voiceChannel = activeVoiceChannel ?? (isVoiceCapableChannel(selected) ? selected : null);
 
   const voiceChannelHasLive = Boolean(voiceChannel && voiceLiveByChannel[voiceChannel.id]);
   const voiceChannelTakeover = Boolean(voiceChannel && voiceLiveTakeoverByChannel[voiceChannel.id]);
@@ -207,31 +195,7 @@ export default function App() {
   return (
     <div className="m-root" ref={rootRef}>
       {/* Top bar */}
-      <div className="m-topbar">
-        <div className="m-brand">Divergence</div>
-
-        <div className="m-topbar__channel">
-          {selected ? (
-            <>
-              <span className="m-topbar__channel-name">{selected.name}</span>
-              <span className="m-topbar__channel-type">{typeLabel}</span>
-            </>
-          ) : (
-            <span style={{ color: "var(--m-text-3)" }}>No channel selected</span>
-          )}
-        </div>
-
-        <div className="m-topbar__user">
-          <div
-            className="m-avatar"
-            style={{ background: "var(--m-cyan)" }}
-          />
-          <span className="m-topbar__username">{username}</span>
-          <button className="m-topbar__logout" onClick={handleLogout}>
-            logout
-          </button>
-        </div>
-      </div>
+      <AppTopbar selected={selected} username={username} onLogout={handleLogout} />
 
       {/* Main content area */}
       <div className="m-content">

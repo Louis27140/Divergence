@@ -1,16 +1,9 @@
 import type { Message } from "../types";
+import { usernameColor } from "../utils/userColor";
 
 type MessageLineProps = {
   message: Message;
 };
-
-function usernameHue(name: string): number {
-  let hash = 0;
-  for (let i = 0; i < name.length; i++) {
-    hash = name.charCodeAt(i) + ((hash << 5) - hash);
-  }
-  return Math.abs(hash) % 360;
-}
 
 function formatMessageDateTime(rawDate: string): string {
   const date = new Date(rawDate);
@@ -46,8 +39,7 @@ function formatMessageDateTime(rawDate: string): string {
 }
 
 export function MessageLine({ message }: MessageLineProps) {
-  const hue = usernameHue(message.author_username);
-  const color = `hsl(${hue}, 70%, 65%)`;
+  const color = usernameColor(message.author_username);
   const dateTime = formatMessageDateTime(message.created_at);
 
   return (

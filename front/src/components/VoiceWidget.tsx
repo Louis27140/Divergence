@@ -2,6 +2,7 @@ import { ConnectionState, Room, RoomEvent, Track } from "livekit-client";
 import { useEffect, useRef, useState } from "react";
 import { socket } from "../socket";
 import type { VoiceUser } from "../types";
+import { usernameColor } from "../utils/userColor";
 import { StreamPanel } from "./StreamPanel";
 
 const API = import.meta.env.VITE_API_URL;
@@ -22,14 +23,6 @@ type VoiceWidgetProps = {
   /** Container in the main area where tiles are moved when live takeover is active */
   expandedContainerRef?: { current: HTMLDivElement | null };
 };
-
-function usernameHue(name: string): number {
-  let hash = 0;
-  for (let i = 0; i < name.length; i++) {
-    hash = name.charCodeAt(i) + ((hash << 5) - hash);
-  }
-  return Math.abs(hash) % 360;
-}
 
 export function VoiceWidget({
   channelId,
@@ -488,7 +481,7 @@ export function VoiceWidget({
                     <div className="m-voice__user" key={`${user.username}-${i}`}>
                       <div
                         className="m-voice__user-dot"
-                        style={{ background: `hsl(${usernameHue(user.username)}, 70%, 65%)` }}
+                        style={{ background: usernameColor(user.username) }}
                       />
                       {user.username}
                     </div>

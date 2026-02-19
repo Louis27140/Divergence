@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { socket } from "../socket";
 import type { Channel, Message } from "../types";
+import { hasTextChannel } from "../utils/channel";
 import { MessageLine } from "./MessageLine";
 
 type MessageFeedProps = {
@@ -20,7 +21,7 @@ export function MessageFeed({ channel, username, token }: MessageFeedProps) {
   const isTypingRef = useRef(false);
   const previousChannelIdRef = useRef<string | null>(null);
 
-  const hasText = Boolean(channel && (channel.type === "text" || channel.type === "both"));
+  const hasText = hasTextChannel(channel);
 
   function clearTypingTimer() {
     if (!typingTimeoutRef.current) return;
