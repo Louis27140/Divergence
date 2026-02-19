@@ -1,5 +1,5 @@
-import Fastify from "fastify";
 import cors from "@fastify/cors";
+import Fastify from "fastify";
 import { Server as IOServer } from "socket.io";
 
 import authRoutes from "./routes/auth";
@@ -12,75 +12,166 @@ import "dotenv/config";
 async function main() {
   const app = Fastify({ logger: true });
 
-  const ORIGINS = process.env.ORIGINS?.split(",") || [];
+  const origins = process.env.ORIGINS?.split(",") || [];
 
-  const voicePresence = new Map<
-  string,
-  Map<string, { username: string }>
->();
+  const voicePresence = new Map<string, Map<string, { username: string }>>();
+  const typingPresence = new Map<string, Map<string, { username: string }>>();
 
-  // 1) CORS d'abord
   await app.register(cors, {
-    origin: ORIGINS,
+    origin: origins,
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
   });
 
-  // 2) Routes ensuite
   await app.register(authRoutes);
   await app.register(channelRoutes);
   await app.register(messageRoutes);
   await app.register(voiceRoutes);
 
-  // 3) Socket.IO: même politique que REST (pas origin:true)
   const io = new IOServer(app.server, {
-    cors: { origin: ORIGINS, credentials: true },
+    cors: { origin: origins, credentials: true },
   });
 
   app.decorate("io", io);
 
-  io.on("connection", (socket) => {
-    socket.on("join", ({ channelId }) => socket.join(`channel:${channelId}`));
-    socket.on("leave", ({ channelId }) => socket.leave(`channel:${channelId}`));
-    
-    socket.on("voice:join", ({ channelId, username }) => {
-  let chan = voicePresence.get(channelId);
-  if (!chan) {
-    chan = new Map();
-    voicePresence.set(channelId, chan);
+  function emitTypingState(channelId: string) {
+    const channelTyping = typingPresence.get(channelId);
+    const users = channelTyping ? Array.from(new Set(Array.from(channelTyping.values()).map((u) => u.username))) : [];
+    io.to(`channel:${channelId}`).emit("typing:state", {
+      channelId,
+      users,
+    });
   }
 
-  chan.set(socket.id, { username });
+  io.on("connection", (socket) => {
+    socket.on("voice:ping", (_payload, ack) => {
+      if (typeof ack === "function") {
+        ack({ ts: Date.now() });
+      }
+    });
 
-  io.to(`channel:${channelId}`).emit("voice:state", {
-    channelId,
-    users: Array.from(chan.values()),
-  });
-});
+    socket.on("wizz", ({ channelId, username }) => {
+      if (!channelId || typeof channelId !== "string") return;
+      if (!username || typeof username !== "string") return;
+      if (!socket.rooms.has(`channel:${channelId}`)) return;
 
-socket.on("voice:leave", ({ channelId }) => {
-  const chan = voicePresence.get(channelId);
-  if (!chan) return;
+      io.to(`channel:${channelId}`).emit("wizz", {
+        channelId,
+        username: username.slice(0, 32),
+      });
+    });
 
-  chan.delete(socket.id);
+    socket.on("join", ({ channelId }) => {
+      socket.join(`channel:${channelId}`);
 
-  io.to(`channel:${channelId}`).emit("voice:state", {
-    channelId,
-    users: Array.from(chan.values()),
-  });
-});
+      const channelPresence = voicePresence.get(channelId);
+      socket.emit("voice:state", {
+        channelId,
+        users: channelPresence ? Array.from(channelPresence.values()) : [],
+      });
 
-socket.on("disconnect", () => {
-  for (const [channelId, chan] of voicePresence.entries()) {
-    if (chan.delete(socket.id)) {
+      const channelTyping = typingPresence.get(channelId);
+      const users = channelTyping ? Array.from(new Set(Array.from(channelTyping.values()).map((u) => u.username))) : [];
+      socket.emit("typing:state", {
+        channelId,
+        users,
+      });
+    });
+
+    socket.on("leave", ({ channelId }) => {
+      socket.leave(`channel:${channelId}`);
+
+      const channelTyping = typingPresence.get(channelId);
+      if (!channelTyping) return;
+
+      if (!channelTyping.delete(socket.id)) return;
+      emitTypingState(channelId);
+      if (channelTyping.size === 0) {
+        typingPresence.delete(channelId);
+      }
+    });
+
+    socket.on("typing:start", ({ channelId, username }) => {
+      let channelTyping = typingPresence.get(channelId);
+      if (!channelTyping) {
+        channelTyping = new Map();
+        typingPresence.set(channelId, channelTyping);
+      }
+
+      channelTyping.set(socket.id, { username });
+      emitTypingState(channelId);
+    });
+
+    socket.on("typing:stop", ({ channelId }) => {
+      const channelTyping = typingPresence.get(channelId);
+      if (!channelTyping) return;
+
+      if (!channelTyping.delete(socket.id)) return;
+      emitTypingState(channelId);
+      if (channelTyping.size === 0) {
+        typingPresence.delete(channelId);
+      }
+    });
+
+    socket.on("voice:join", ({ channelId, username }) => {
+      let channelPresence = voicePresence.get(channelId);
+      if (!channelPresence) {
+        channelPresence = new Map();
+        voicePresence.set(channelId, channelPresence);
+      }
+
+      channelPresence.set(socket.id, { username });
+
       io.to(`channel:${channelId}`).emit("voice:state", {
         channelId,
-        users: Array.from(chan.values()),
+        users: Array.from(channelPresence.values()),
       });
-    }
-  }
-});
+    });
+
+    socket.on("voice:leave", ({ channelId }) => {
+      const channelPresence = voicePresence.get(channelId);
+      if (!channelPresence) return;
+
+      channelPresence.delete(socket.id);
+
+      io.to(`channel:${channelId}`).emit("voice:state", {
+        channelId,
+        users: Array.from(channelPresence.values()),
+      });
+
+      if (channelPresence.size === 0) {
+        voicePresence.delete(channelId);
+      }
+    });
+
+    socket.on("disconnect", () => {
+      for (const [channelId, channelPresence] of voicePresence.entries()) {
+        if (!channelPresence.delete(socket.id)) {
+          continue;
+        }
+
+        io.to(`channel:${channelId}`).emit("voice:state", {
+          channelId,
+          users: Array.from(channelPresence.values()),
+        });
+
+        if (channelPresence.size === 0) {
+          voicePresence.delete(channelId);
+        }
+      }
+
+      for (const [channelId, channelTyping] of typingPresence.entries()) {
+        if (!channelTyping.delete(socket.id)) {
+          continue;
+        }
+
+        emitTypingState(channelId);
+        if (channelTyping.size === 0) {
+          typingPresence.delete(channelId);
+        }
+      }
+    });
   });
 
   await app.listen({ host: "0.0.0.0", port: 3000 });

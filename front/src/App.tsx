@@ -1,294 +1,281 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { api } from "./api";
+import { ChannelDock } from "./components/ChannelDock";
+import { LoginScreen } from "./components/LoginScreen";
+import { MessageFeed } from "./components/MessageFeed";
+import { VoiceWidget } from "./components/VoiceWidget";
 import { socket } from "./socket";
-import { VoiceButton } from "./components/VoiceButton";
-
-type ChannelType = "text" | "voice" | "both";
-type Channel = { id: string; name: string; type: ChannelType };
-
-type Message = {
-  id: string;
-  channel_id: string;
-  author_id: string;
-  author_username: string;
-  content: string;
-  created_at: string;
-};
-const API = import.meta.env.VITE_API_URL;
-
-
-async function api<T>(path: string, opts: RequestInit = {}, token?: string): Promise<T> {
-  const res = await fetch(`${API}${path}`, {
-    ...opts,
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(opts.headers ?? {}),
-    },
-  });
-
-  if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(`${res.status} ${txt}`);
-  }
-  return res.json();
-}
+import type { Channel, VoiceUser } from "./types";
 
 export default function App() {
-  const [token, setToken] = useState<string>("");
-
+  const [token, setToken] = useState("");
   const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
-
   const [channels, setChannels] = useState<Channel[]>([]);
   const [selected, setSelected] = useState<Channel | null>(null);
+  const [activeVoiceChannel, setActiveVoiceChannel] = useState<Channel | null>(null);
+  const [voiceConnectTrigger, setVoiceConnectTrigger] = useState(0);
+  const [voiceConnectChannelId, setVoiceConnectChannelId] = useState<string | null>(null);
+  const [voiceUsersByChannel, setVoiceUsersByChannel] = useState<
+    Record<string, VoiceUser[]>
+  >({});
+  const [voiceLiveByChannel, setVoiceLiveByChannel] = useState<Record<string, boolean>>({});
+  const [voiceLiveTakeoverByChannel, setVoiceLiveTakeoverByChannel] = useState<
+    Record<string, boolean>
+  >({});
+  const rootRef = useRef<HTMLDivElement>(null);
+  // Must be declared before any early return to respect Rules of Hooks
+  const expandedLiveRef = useRef<HTMLDivElement>(null);
 
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [content, setContent] = useState("");
-
-  // ✅ voice presence state (INSIDE App)
-  const [voiceUsers, setVoiceUsers] = useState<{ username: string }[]>([]);
-
-  // Create channel UI
-  const [newChannelName, setNewChannelName] = useState("");
-  const [newChannelType, setNewChannelType] = useState<ChannelType>("both");
-
-  const joinedRef = useRef<string | null>(null);
-
-  // messages socket listener
+  // Voice state listener (global)
   useEffect(() => {
-    function onNewMessage(msg: Message) {
-      if (selected && msg.channel_id === selected.id) {
-        setMessages((prev) => [msg, ...prev]);
-      }
+    function onVoiceState(payload: { channelId: string; users: VoiceUser[] }) {
+      setVoiceUsersByChannel((prev) => ({
+        ...prev,
+        [payload.channelId]: payload.users,
+      }));
     }
-    socket.on("new_message", onNewMessage);
-    return () => {
-      socket.off("new_message", onNewMessage);
-    };
-  }, [selected]);
-
-  // voice presence listener
-  useEffect(() => {
-    function onVoiceState(payload: { channelId: string; users: { username: string }[] }) {
-      if (selected && payload.channelId === selected.id) {
-        setVoiceUsers(payload.users);
-      }
-    }
-
     socket.on("voice:state", onVoiceState);
     return () => {
       socket.off("voice:state", onVoiceState);
     };
-  }, [selected]);
+  }, []);
 
-  async function login() {
-    const res = await api<{ token: string }>("/auth/login", {
-      method: "POST",
-      body: JSON.stringify({ username, password }),
-    });
-    setToken(res.token);
-  }
-
-  async function loadChannels(t: string) {
-    const res = await api<{ channels: Channel[] }>("/channels", {}, t);
-    setChannels(res.channels);
-    if (!selected && res.channels.length) setSelected(res.channels[0]);
-  }
-
-  async function loadMessages(channelId: string, t: string) {
-    const res = await api<{ messages: Message[] }>(`/channels/${channelId}/messages`, {}, t);
-    setMessages(res.messages);
-  }
-
-  async function createChannel() {
-    if (!token) return;
-    const name = newChannelName.trim();
-    if (!name) return;
-
-    const res = await api<{ channel: Channel }>(
-      "/channels",
-      {
-        method: "POST",
-        body: JSON.stringify({ name, type: newChannelType }),
-      },
-      token
-    );
-
-    setChannels((prev) => [res.channel, ...prev]);
-    setSelected(res.channel);
-    setNewChannelName("");
-    setNewChannelType("both");
-  }
-
+  // Wizz easter egg (shake on remote /wizz in current channel)
   useEffect(() => {
-    if (!token) return;
-    loadChannels(token).catch(console.error);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token]);
+    function onWizz(payload: { channelId: string; username: string }) {
+      if (!selected || payload.channelId !== selected.id) return;
+      if (payload.username === username) return;
 
-  // selecting a channel: fetch + join socket room
-  useEffect(() => {
-    if (!token || !selected) return;
+      const root = rootRef.current;
+      if (!root) return;
 
-    // messages only if channel supports text
-    if (selected.type === "text" || selected.type === "both") {
-      loadMessages(selected.id, token).catch(console.error);
-    } else {
-      setMessages([]);
+      root.classList.remove("m-root--wizz");
+      void root.offsetWidth;
+      root.classList.add("m-root--wizz");
+      root.addEventListener(
+        "animationend",
+        () => {
+          root.classList.remove("m-root--wizz");
+        },
+        { once: true },
+      );
     }
 
-    // reset voice users display on channel switch (optional)
-    setVoiceUsers([]);
+    socket.on("wizz", onWizz);
+    return () => {
+      socket.off("wizz", onWizz);
+    };
+  }, [selected, username]);
 
-    // leave previous socket room
-    if (joinedRef.current) socket.emit("leave", { channelId: joinedRef.current });
-    // join new socket room
-    socket.emit("join", { channelId: selected.id });
-    joinedRef.current = selected.id;
-  }, [selected, token]);
+  // Load channels when authenticated
+  useEffect(() => {
+    if (!token) return;
+    api<{ channels: Channel[] }>("/channels", {}, token)
+      .then((res) => {
+        setChannels(res.channels);
+        if (res.channels.length > 0 && !selected) {
+          setSelected(res.channels[0]);
+        }
+      })
+      .catch(console.error);
+  }, [token]);
 
-  async function sendMessage() {
-    if (!token || !selected) return;
-    if (!(selected.type === "text" || selected.type === "both")) return;
+  // Join/leave socket rooms for all channels
+  useEffect(() => {
+    if (!token || channels.length === 0) return;
 
-    const text = content.trim();
-    if (!text) return;
+    channels.forEach((ch) => {
+      socket.emit("join", { channelId: ch.id });
+    });
 
-    await api(
-      `/channels/${selected.id}/messages`,
-      {
-        method: "POST",
-        body: JSON.stringify({ content: text }),
-      },
-      token
-    );
+    return () => {
+      channels.forEach((ch) => {
+        socket.emit("leave", { channelId: ch.id });
+      });
+    };
+  }, [channels, token]);
 
-    setContent("");
+  // Keep a sticky active voice channel when a voice-capable channel becomes selected programmatically.
+  useEffect(() => {
+    if (activeVoiceChannel) return;
+    if (!selected) return;
+    if (selected.type === "text") return;
+    setActiveVoiceChannel(selected);
+  }, [activeVoiceChannel, selected]);
+
+  function handleLogin(tok: string, user: string) {
+    setToken(tok);
+    setUsername(user);
   }
 
-  const authed = useMemo(() => Boolean(token), [token]);
+  function handleLogout() {
+    setToken("");
+    setUsername("");
+    setChannels([]);
+    setSelected(null);
+    setActiveVoiceChannel(null);
+    setVoiceConnectTrigger(0);
+    setVoiceConnectChannelId(null);
+    setVoiceUsersByChannel({});
+    setVoiceLiveByChannel({});
+    setVoiceLiveTakeoverByChannel({});
+  }
+
+  function handleChannelCreated(ch: Channel) {
+    setChannels((prev) => [ch, ...prev]);
+    setSelected(ch);
+  }
+
+  function handleChannelSelect(ch: Channel) {
+    setSelected(ch);
+  }
+
+  function handleChannelVoiceOpen(ch: Channel) {
+    setSelected(ch);
+    if (ch.type === "voice" || ch.type === "both") {
+      setActiveVoiceChannel(ch);
+    }
+    if (ch.type === "voice" || ch.type === "both") {
+      setVoiceConnectChannelId(ch.id);
+      setVoiceConnectTrigger((prev) => prev + 1);
+    }
+  }
+
+  const handleVoiceLiveState = useCallback((channelId: string, isLive: boolean) => {
+    setVoiceLiveByChannel((prev) => {
+      if (prev[channelId] === isLive) return prev;
+      return {
+        ...prev,
+        [channelId]: isLive,
+      };
+    });
+    if (!isLive) {
+      setVoiceLiveTakeoverByChannel((prev) => {
+        if (!prev[channelId]) return prev;
+        return {
+          ...prev,
+          [channelId]: false,
+        };
+      });
+    }
+  }, []);
+
+  const handleToggleVoiceLiveTakeover = useCallback((channelId: string) => {
+    setVoiceLiveTakeoverByChannel((prev) => ({
+      ...prev,
+      [channelId]: !prev[channelId],
+    }));
+  }, []);
+
+  // Auto-takeover for voice-only channels: when a live starts, show it on the left automatically
+  useEffect(() => {
+    if (!activeVoiceChannel) return;
+    if (activeVoiceChannel.type !== "voice") return;
+    if (!voiceLiveByChannel[activeVoiceChannel.id]) return;
+    setVoiceLiveTakeoverByChannel((prev) => {
+      if (prev[activeVoiceChannel.id]) return prev;
+      return { ...prev, [activeVoiceChannel.id]: true };
+    });
+  }, [activeVoiceChannel, voiceLiveByChannel]);
+
+  // Login screen
+  if (!token) {
+    return <LoginScreen onLogin={handleLogin} />;
+  }
+
+  const voiceChannel =
+    activeVoiceChannel ??
+    (selected && (selected.type === "voice" || selected.type === "both")
+      ? selected
+      : null);
+
+  const typeLabel = selected
+    ? selected.type === "text"
+      ? "text"
+      : selected.type === "voice"
+        ? "voice"
+        : "text + voice"
+    : "";
+
+  const voiceChannelHasLive = Boolean(voiceChannel && voiceLiveByChannel[voiceChannel.id]);
+  const voiceChannelTakeover = Boolean(voiceChannel && voiceLiveTakeoverByChannel[voiceChannel.id]);
+  // Show expanded live only when the selected channel IS the active voice channel
+  // (navigating to another channel shows that channel's text feed instead)
+  const showExpandedLive =
+    voiceChannelHasLive && voiceChannelTakeover && selected?.id === voiceChannel?.id;
 
   return (
-    <div style={{ fontFamily: "system-ui", padding: 16, display: "flex", gap: 16 }}>
-      {!authed ? (
-        <div style={{ maxWidth: 320 }}>
-          <h2>Login</h2>
-          <div style={{ display: "grid", gap: 8 }}>
-            <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="username" />
-            <input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="password" type="password" />
-            <button onClick={login}>Login</button>
-          </div>
+    <div className="m-root" ref={rootRef}>
+      {/* Top bar */}
+      <div className="m-topbar">
+        <div className="m-brand">Divergence</div>
+
+        <div className="m-topbar__channel">
+          {selected ? (
+            <>
+              <span className="m-topbar__channel-name">{selected.name}</span>
+              <span className="m-topbar__channel-type">{typeLabel}</span>
+            </>
+          ) : (
+            <span style={{ color: "var(--m-text-3)" }}>No channel selected</span>
+          )}
         </div>
-      ) : (
-        <>
-          <div style={{ width: 280 }}>
-            {/* Voice area */}
-            {selected && (selected.type === "voice" || selected.type === "both") && (
-              <div style={{ marginBottom: 10, border: "1px solid #ddd", padding: 8 }}>
-                <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 6 }}>
-                  Voice presence: {voiceUsers.length}
-                </div>
-                {voiceUsers.length > 0 && (
-                  <div style={{ fontSize: 13, marginBottom: 8 }}>
-                    {voiceUsers.map((u, i) => (
-                      <div key={`${u.username}-${i}`}>• {u.username}</div>
-                    ))}
-                  </div>
-                )}
 
-                {/* ✅ pass channelId + username so VoiceButton can emit join/leave */}
-                <VoiceButton key={selected.id} channelId={selected.id} username={username} token={token} />
-              </div>
-            )}
+        <div className="m-topbar__user">
+          <div
+            className="m-avatar"
+            style={{ background: "var(--m-cyan)" }}
+          />
+          <span className="m-topbar__username">{username}</span>
+          <button className="m-topbar__logout" onClick={handleLogout}>
+            logout
+          </button>
+        </div>
+      </div>
 
-            <h3>Channels</h3>
+      {/* Main content area */}
+      <div className="m-content">
+        {/* Left area: text/voice feed, hidden when live takeover shows instead */}
+        {!showExpandedLive && (
+          <MessageFeed channel={selected} username={username} token={token} />
+        )}
 
-            {/* Create channel */}
-            <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
-              <input
-                value={newChannelName}
-                onChange={(e) => setNewChannelName(e.target.value)}
-                placeholder="New channel name"
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") createChannel().catch(console.error);
-                }}
-              />
+        {/* Expanded live container — always in DOM so the ref stays valid for tile moves */}
+        <div
+          ref={expandedLiveRef}
+          className="m-live-expanded"
+          style={{ display: showExpandedLive ? "flex" : "none" }}
+        />
 
-              <div style={{ display: "flex", gap: 6 }}>
-                <button onClick={() => setNewChannelType("text")} style={{ flex: 1, background: newChannelType === "text" ? "#eee" : "white" }}>
-                  Text
-                </button>
-                <button onClick={() => setNewChannelType("voice")} style={{ flex: 1, background: newChannelType === "voice" ? "#eee" : "white" }}>
-                  Voice
-                </button>
-                <button onClick={() => setNewChannelType("both")} style={{ flex: 1, background: newChannelType === "both" ? "#eee" : "white" }}>
-                  Both
-                </button>
-              </div>
-
-              <button onClick={() => createChannel().catch(console.error)}>Create</button>
-            </div>
-
-            <button onClick={() => loadChannels(token).catch(console.error)} style={{ width: "100%", marginBottom: 8 }}>
-              Refresh
-            </button>
-
-            <div style={{ display: "grid", gap: 6 }}>
-              {channels.map((c) => (
-                <button
-                  key={c.id}
-                  onClick={() => setSelected(c)}
-                  style={{
-                    textAlign: "left",
-                    padding: 8,
-                    border: "1px solid #ccc",
-                    background: selected?.id === c.id ? "#eee" : "white",
-                  }}
-                >
-                  #{c.name} <span style={{ opacity: 0.6 }}>({c.type})</span>
-                </button>
-              ))}
-            </div>
+        {/* Voice panel — always on the right, fixed 300px width */}
+        {voiceChannel && (
+          <div className="m-voice-panel">
+            <VoiceWidget
+              channelId={voiceChannel.id}
+              username={username}
+              token={token}
+              voiceUsers={voiceUsersByChannel[voiceChannel.id] ?? []}
+              connectTrigger={voiceConnectTrigger}
+              connectChannelId={voiceConnectChannelId}
+              onLiveStateChange={handleVoiceLiveState}
+              onToggleLiveTakeover={handleToggleVoiceLiveTakeover}
+              liveTakeoverActive={voiceChannelTakeover}
+              expandedContainerRef={expandedLiveRef}
+            />
           </div>
+        )}
+      </div>
 
-          <div style={{ flex: 1 }}>
-            <h3>{selected ? `#${selected.name}` : "Select a channel"}</h3>
-
-            {/* Message composer only for text/both */}
-            {selected && (selected.type === "text" || selected.type === "both") ? (
-              <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-                <input
-                  value={content}
-                  onChange={(e) => setContent(e.target.value)}
-                  placeholder="Message..."
-                  style={{ flex: 1 }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") sendMessage().catch(console.error);
-                  }}
-                />
-                <button onClick={() => sendMessage().catch(console.error)}>Send</button>
-              </div>
-            ) : (
-              <div style={{ opacity: 0.7, marginBottom: 8 }}>Voice-only channel.</div>
-            )}
-
-            <div style={{ border: "1px solid #ddd", padding: 8, minHeight: 360 }}>
-              {messages.length === 0 ? (
-                <p style={{ opacity: 0.7 }}>No messages.</p>
-              ) : (
-                messages.map((m) => (
-                  <div key={m.id} style={{ padding: "6px 0", borderBottom: "1px solid #eee" }}>
-                    <div style={{ fontSize: 12, opacity: 0.7 }}>
-                      {m.author_username} • {new Date(m.created_at).toLocaleString()}
-                    </div>
-                    <div>{m.content}</div>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-        </>
-      )}
+      {/* Channel dock (bottom) */}
+      <ChannelDock
+        channels={channels}
+        selected={selected}
+        voiceUsersByChannel={voiceUsersByChannel}
+        token={token}
+        onSelect={handleChannelSelect}
+        onOpen={handleChannelVoiceOpen}
+        onCreated={handleChannelCreated}
+      />
     </div>
   );
 }

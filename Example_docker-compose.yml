@@ -64,18 +64,45 @@ services:
     volumes:
       - ./back:/app
       - /app/node_modules
-    command: npm run dev
+    command: sh -c "if [ ! -x node_modules/.bin/nodemon ]; then npm install; fi && npm run dev"
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./back/src
+          target: /app/src
+        - action: rebuild
+          path: ./back/package.json
+        - action: rebuild
+          path: ./back/package-lock.json
 
   front:
     build: ./front
     depends_on:
       - back
+    environment:
+      VITE_USE_POLLING: "true"
+      VITE_POLL_INTERVAL: "150"
     ports:
       - "5173:5173"
     volumes:
       - ./front:/app
       - /app/node_modules
     command: npm run dev -- --host 0.0.0.0
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./front/src
+          target: /app/src
+        - action: sync+restart
+          path: ./front/index.html
+          target: /app/index.html
+        - action: sync+restart
+          path: ./front/vite.config.ts
+          target: /app/vite.config.ts
+        - action: rebuild
+          path: ./front/package.json
+        - action: rebuild
+          path: ./front/package-lock.json
 
   livekit:
     image: livekit/livekit-server:latest

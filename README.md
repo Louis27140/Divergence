@@ -204,6 +204,12 @@ docker compose up -d
 
 The application will be available at `https://chat.<YOUR_IP>.nip.io`.
 
+For development with automatic restart on frontend/backend source changes:
+
+```bash
+docker compose up --watch
+```
+
 ## API Reference
 
 All authenticated endpoints require the header: `Authorization: Bearer <token>`
@@ -290,6 +296,14 @@ Divergence/
 ```
 
 ## Development
+
+### Docker (auto-restart)
+
+Use Docker Compose watch mode to automatically sync and restart `front` and `back` when source files change:
+
+```bash
+docker compose up --watch
+```
 
 To run the project locally without Docker:
 
