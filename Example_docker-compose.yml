@@ -17,15 +17,15 @@ services:
     ports:
       - "3478:3478/udp"
       - "3478:3478/tcp"
-      - "49160-49200:49160-49200/udp"
+      - "40000-40100:40000-40100/udp"
     command:
     - -n
     - --log-file=stdout
     - --listening-ip=0.0.0.0
     - --external-ip=<IP_ADDRESS>
     - --listening-port=3478
-    - --min-port=49160
-    - --max-port=49200
+    - --min-port=40000
+    - --max-port=40100
     - --fingerprint
     - --lt-cred-mech
     - --user=turnuser:turnpass

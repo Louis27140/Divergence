@@ -8,3 +8,4 @@ front/.env.local
 
 back/node_modules
 back/.ENV
+back/uploads

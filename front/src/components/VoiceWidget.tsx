@@ -1,9 +1,11 @@
-import { ConnectionState, Room, RoomEvent, Track } from "livekit-client";
+import { ConnectionState, RemoteParticipant, Room, RoomEvent, Track } from "livekit-client";
 import { useEffect, useRef, useState } from "react";
 import { socket } from "../socket";
-import type { VoiceUser } from "../types";
-import { usernameColor } from "../utils/userColor";
+import type { User, VoiceUser } from "../types";
+import { PERM, hasPerm } from "../utils/permissions";
+import { usernameColor, type ThemeMode } from "../utils/userColor";
 import { StreamPanel } from "./StreamPanel";
+import { UserAvatar } from "./UserAvatar";
 
 const API = import.meta.env.VITE_API_URL;
 const LIVEKIT_URL = import.meta.env.VITE_LIVEKIT_URL;
@@ -13,10 +15,17 @@ type LogLine = { t: string; msg: string };
 type VoiceWidgetProps = {
   channelId: string;
   username: string;
+  currentUserAvatarUrl?: string | null;
   token: string;
+  theme: ThemeMode;
   voiceUsers: VoiceUser[];
+  channelMembers: string[];
   connectTrigger?: number;
   connectChannelId?: string | null;
+  /** Whether the current user has VOICE permission on this channel */
+  canVoice?: boolean;
+  micDeviceId?: string;
+  outputDeviceId?: string;
   onLiveStateChange?: (channelId: string, isLive: boolean) => void;
   onToggleLiveTakeover?: (channelId: string) => void;
   liveTakeoverActive?: boolean;
@@ -27,10 +36,16 @@ type VoiceWidgetProps = {
 export function VoiceWidget({
   channelId,
   username,
+  currentUserAvatarUrl,
   token,
+  theme,
   voiceUsers,
+  channelMembers,
   connectTrigger = 0,
   connectChannelId = null,
+  canVoice = true,
+  micDeviceId = undefined,
+  outputDeviceId = undefined,
   onLiveStateChange,
   onToggleLiveTakeover,
   liveTakeoverActive = false,
@@ -38,13 +53,22 @@ export function VoiceWidget({
 }: VoiceWidgetProps) {
   const roomRef = useRef<Room | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
-  const audioElsRef = useRef<HTMLAudioElement[]>([]);
+  const audioElsRef = useRef<Map<string, HTMLAudioElement>>(new Map());
+  const gainNodesRef = useRef<Map<string, GainNode>>(new Map());
   const [joined, setJoined] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [pingMs, setPingMs] = useState<number | null>(null);
-  const [expanded, setExpanded] = useState(true);
   const [showDebug, setShowDebug] = useState(false);
   const [logs, setLogs] = useState<LogLine[]>([]);
+
+  const [sidebarTab, setSidebarTab] = useState<"members" | "voice">("members");
+  const [accessibleMembers, setAccessibleMembers] = useState<Array<User>>([]);
+  const [allUsers, setAllUsers] = useState<Array<User>>([]);
+  const [membersLoading, setMembersLoading] = useState(false);
+
+  const [userVolumes, setUserVolumes] = useState<Record<string, number>>({});
+  const userVolumesRef = useRef<Record<string, number>>({});
+  const [volMenu, setVolMenu] = useState<{ username: string; x: number; y: number } | null>(null);
 
   const [muted, setMuted] = useState(false);
   const [screenSharing, setScreenSharing] = useState(false);
@@ -53,6 +77,18 @@ export function VoiceWidget({
   const previousJoinedRef = useRef(false);
   // Ref so non-reactive DOM functions (addScreenShareTile) always see the current value
   const liveTakeoverActiveRef = useRef(liveTakeoverActive);
+
+  function setUserVolume(identity: string, vol: number) {
+    userVolumesRef.current = { ...userVolumesRef.current, [identity]: vol };
+    setUserVolumes({ ...userVolumesRef.current });
+    const gain = gainNodesRef.current.get(identity);
+    if (gain) {
+      gain.gain.value = vol;
+    } else {
+      const el = audioElsRef.current.get(identity);
+      if (el) el.volume = Math.min(1, vol);
+    }
+  }
 
   function log(msg: string) {
     const t = new Date().toLocaleTimeString();
@@ -120,7 +156,7 @@ export function VoiceWidget({
     const fullscreenBtn = document.createElement("button");
     fullscreenBtn.type = "button";
     fullscreenBtn.className = "m-screen-share__fullscreen-btn";
-    fullscreenBtn.textContent = "Plein ecran";
+    fullscreenBtn.textContent = "Fullscreen";
     fullscreenBtn.onclick = () => requestFullscreen(videoEl);
 
     header.appendChild(titleNode);
@@ -187,7 +223,8 @@ export function VoiceWidget({
       roomRef.current.disconnect();
       roomRef.current = null;
       audioElsRef.current.forEach((el) => el.remove());
-      audioElsRef.current = [];
+      audioElsRef.current.clear();
+      gainNodesRef.current.clear();
       setScreenSharing(false);
       setRemoteScreenShareCount(0);
       if (screenShareContainerRef.current) {
@@ -259,18 +296,21 @@ export function VoiceWidget({
     };
   }, []);
 
-  // Join voice on trigger (double-click)
+  // Join voice on trigger (double-click) — blocked if no VOICE permission
   const lastTriggerRef = useRef(0);
   useEffect(() => {
     if (connectTrigger <= 0) return;
     if (connectChannelId !== channelId) return;
     if (lastTriggerRef.current === connectTrigger) return;
     lastTriggerRef.current = connectTrigger;
+    if (!canVoice) return;
+    setSidebarTab("voice");
     void join();
-  }, [channelId, connectChannelId, connectTrigger]);
+  }, [channelId, connectChannelId, connectTrigger, canVoice]);
 
   async function join() {
     if (roomRef.current || connecting) return;
+    setSidebarTab("voice");
     setConnecting(true);
     log("[VOICE] join requested");
 
@@ -296,7 +336,9 @@ export function VoiceWidget({
       }
 
       log("[VOICE] requesting microphone access");
-      await navigator.mediaDevices.getUserMedia({ audio: true });
+      await navigator.mediaDevices.getUserMedia({
+        audio: micDeviceId ? { deviceId: { exact: micDeviceId } } : true,
+      });
       log("[VOICE] microphone access granted");
 
       const room = new Room();
@@ -317,7 +359,26 @@ export function VoiceWidget({
           el.autoplay = true;
           el.setAttribute("playsinline", "true");
           document.body.appendChild(el);
-          audioElsRef.current.push(el);
+          audioElsRef.current.set(participant.identity, el);
+          if (outputDeviceId && typeof (el as any).setSinkId === "function") {
+            void (el as any).setSinkId(outputDeviceId).catch(() => {});
+          }
+
+          // Route through GainNode so volume can exceed 100%
+          const ctx = getAudioContext();
+          if (ctx) {
+            try {
+              const source = ctx.createMediaElementSource(el);
+              const gain = ctx.createGain();
+              gain.gain.value = userVolumesRef.current[participant.identity] ?? 1;
+              source.connect(gain);
+              gain.connect(ctx.destination);
+              gainNodesRef.current.set(participant.identity, gain);
+            } catch {
+              el.volume = Math.min(1, userVolumesRef.current[participant.identity] ?? 1);
+            }
+          }
+
           try {
             await el.play();
           } catch (error: any) {
@@ -332,7 +393,7 @@ export function VoiceWidget({
         }
       });
 
-      room.on(RoomEvent.TrackUnsubscribed, (track, publication) => {
+      room.on(RoomEvent.TrackUnsubscribed, (track, publication, participant: RemoteParticipant) => {
         log(`[LK] track unsubscribed kind=${track.kind}`);
         track.detach().forEach((el) => {
           const tile = (el as HTMLElement).closest(".m-screen-share__tile");
@@ -343,7 +404,10 @@ export function VoiceWidget({
           el.remove();
         });
 
-        if (track.kind === Track.Kind.Video && publication.source === Track.Source.ScreenShare) {
+        if (track.kind === Track.Kind.Audio) {
+          audioElsRef.current.delete(participant.identity);
+          gainNodesRef.current.delete(participant.identity);
+        } else if (track.kind === Track.Kind.Video && publication.source === Track.Source.ScreenShare) {
           removeScreenShareTile(`remote:${track.sid}`);
           setRemoteScreenShareCount((prev) => Math.max(0, prev - 1));
         }
@@ -369,7 +433,9 @@ export function VoiceWidget({
       });
 
       await room.connect(LIVEKIT_URL, lkToken);
-      await room.localParticipant.setMicrophoneEnabled(true);
+      await room.localParticipant.setMicrophoneEnabled(true, {
+        deviceId: micDeviceId,
+      });
       socket.emit("voice:join", { channelId, username });
 
       roomRef.current = room;
@@ -389,7 +455,8 @@ export function VoiceWidget({
     roomRef.current?.disconnect();
     roomRef.current = null;
     audioElsRef.current.forEach((el) => el.remove());
-    audioElsRef.current = [];
+    audioElsRef.current.clear();
+    gainNodesRef.current.clear();
     setScreenSharing(false);
     setMuted(false);
     setRemoteScreenShareCount(0);
@@ -464,73 +531,277 @@ export function VoiceWidget({
     };
   }, [channelId, onLiveStateChange]);
 
+  // Reset to members tab when changing channel
+  useEffect(() => {
+    setSidebarTab("members");
+  }, [channelId]);
+
+  // Load all channel members (including offline) from permission model.
+  useEffect(() => {
+    let cancelled = false;
+    setMembersLoading(true);
+
+    Promise.all([
+      fetch(`${API}/channels/${channelId}/members`, {
+        headers: { Authorization: `Bearer ${token}` },
+      }).then((r) => r.json()),
+      fetch(`${API}/users`, {
+        headers: { Authorization: `Bearer ${token}` },
+      }).then((r) => r.json()),
+    ])
+      .then(([membersRes, usersRes]) => {
+        if (cancelled) return;
+
+        const defaultPerm = typeof membersRes?.default_permissions === "number"
+          ? membersRes.default_permissions
+          : 7;
+        const overrides: Array<{ id: string; permissions: number }> = Array.isArray(membersRes?.users)
+          ? membersRes.users
+          : [];
+        const users: Array<User> = Array.isArray(usersRes?.users)
+          ? usersRes.users
+          : [];
+        setAllUsers(users);
+
+        const overridePermByUserId = new Map(overrides.map((u) => [u.id, u.permissions]));
+        const nextMembers = users
+          .filter((user) => {
+            const effectivePerm = overridePermByUserId.has(user.id)
+              ? overridePermByUserId.get(user.id)!
+              : defaultPerm;
+            return hasPerm(effectivePerm, PERM.READ);
+          })
+          .sort((a, b) => a.username.localeCompare(b.username));
+
+        setAccessibleMembers(nextMembers);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAllUsers([]);
+          setAccessibleMembers([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setMembersLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [channelId, token]);
+
+  const activeChannelMembers = new Set(channelMembers);
+  const activeVoiceMembers = new Set(voiceUsers.map((user) => user.username));
+  const avatarByUsername = new Map(allUsers.map((user) => [user.username, user.avatar_url ?? null]));
+
+  const onlineMembers = accessibleMembers
+    .filter((member) => activeChannelMembers.has(member.username) || activeVoiceMembers.has(member.username))
+    .sort((a, b) => a.username.localeCompare(b.username));
+
+  const offlineMembers = accessibleMembers
+    .filter((member) => !activeChannelMembers.has(member.username) && !activeVoiceMembers.has(member.username))
+    .sort((a, b) => a.username.localeCompare(b.username));
+
   return (
     <>
       <div className="m-voice">
         <div className="m-voice__card">
-          <div className="m-voice__header" onClick={() => setExpanded((p) => !p)}>
-            <div className="m-voice__title">Voice</div>
-            <div className="m-voice__toggle">{expanded ? "▾" : "▸"}</div>
-          </div>
+          <div className="m-voice__body">
+              {/* Tab bar */}
+              <div className="m-voice__tabs">
+                <button
+                  className={`m-voice__tab${sidebarTab === "members" ? " m-voice__tab--active" : ""}`}
+                  onClick={() => setSidebarTab("members")}
+                >
+                  Members
+                </button>
+                <button
+                  className={`m-voice__tab${sidebarTab === "voice" ? " m-voice__tab--active" : ""}`}
+                  onClick={() => setSidebarTab("voice")}
+                >
+                  Voice
+                  {voiceUsers.length > 0 && (
+                    <span className="m-voice__tab-badge">{voiceUsers.length}</span>
+                  )}
+                </button>
+              </div>
 
-          {expanded && (
-            <div className="m-voice__body">
-              {voiceUsers.length > 0 && (
-                <div className="m-voice__users">
-                  {voiceUsers.map((user, i) => (
-                    <div className="m-voice__user" key={`${user.username}-${i}`}>
-                      <div
-                        className="m-voice__user-dot"
-                        style={{ background: usernameColor(user.username) }}
-                      />
-                      {user.username}
-                    </div>
-                  ))}
-                </div>
-              )}
+              {sidebarTab === "members" ? (
+                /* Members tab - sorted by online/offline */
+                <div className="m-member-list">
+                  {membersLoading ? (
+                    <div className="m-voice__empty">Loading...</div>
+                  ) : accessibleMembers.length > 0 ? (
+                    <>
+                      <div className="m-member-group__title">Online ({onlineMembers.length})</div>
+                      {onlineMembers.map((member) => {
+                        const inVoice = activeVoiceMembers.has(member.username);
+                        return (
+                          <div
+                            key={member.id}
+                            className={`m-member-entry${inVoice ? " m-member-entry--in-voice" : ""}`}
+                          >
+                            <UserAvatar
+                              className="m-member-entry__avatar"
+                              username={member.username}
+                              avatarUrl={
+                                member.username === username
+                                  ? (currentUserAvatarUrl ?? member.avatar_url)
+                                  : member.avatar_url
+                              }
+                              size={18}
+                              accentColor={
+                                inVoice
+                                  ? "var(--m-green)"
+                                  : usernameColor(member.username, theme)
+                              }
+                            />
+                            <span className="m-member-entry__name">{member.username}</span>
+                            {inVoice ? (
+                              <span className="m-member-entry__status m-member-entry__status--voice">Voice</span>
+                            ) : (
+                              <span className="m-member-entry__status m-member-entry__status--online">Online</span>
+                            )}
+                          </div>
+                        );
+                      })}
 
-              <button className="m-debug-toggle" onClick={() => setShowDebug((p) => !p)}>
-                {showDebug ? "hide logs" : "debug"}
-              </button>
-
-              {showDebug && (
-                <div className="m-debug">
-                  {logs.length === 0 ? (
-                    <div style={{ opacity: 0.5 }}>No logs yet.</div>
-                  ) : (
-                    logs.map((line, i) => (
-                      <div className="m-debug__line" key={i}>
-                        <span className="m-debug__time">{line.t}</span> {line.msg}
+                      <div className="m-member-group__title m-member-group__title--offline">
+                        Offline ({offlineMembers.length})
                       </div>
-                    ))
+                      {offlineMembers.map((member) => (
+                        <div key={member.id} className="m-member-entry">
+                          <UserAvatar
+                            className="m-member-entry__avatar"
+                            username={member.username}
+                            avatarUrl={
+                              member.username === username
+                                ? (currentUserAvatarUrl ?? member.avatar_url)
+                                : member.avatar_url
+                            }
+                            size={18}
+                            accentColor={usernameColor(member.username, theme)}
+                          />
+                          <span className="m-member-entry__name">{member.username}</span>
+                          <span className="m-member-entry__status m-member-entry__status--offline">
+                            Offline
+                          </span>
+                        </div>
+                      ))}
+                    </>
+                  ) : (
+                    <div className="m-voice__empty">No members with read access</div>
                   )}
                 </div>
+              ) : (
+                /* Voice tab — current voice presence + controls */
+                <>
+                  {voiceUsers.length > 0 ? (
+                    <div className="m-voice__users">
+                      {voiceUsers.map((user, i) => {
+                        const vol = userVolumes[user.username] ?? 1;
+                        const isSelf = user.username === username;
+                        return (
+                          <div
+                            className={`m-voice__user${!isSelf ? " m-voice__user--has-vol" : ""}`}
+                            key={`${user.username}-${i}`}
+                            onContextMenu={!isSelf ? (e: { preventDefault: () => void; clientX: number; clientY: number }) => {
+                              e.preventDefault();
+                              setVolMenu({ username: user.username, x: e.clientX, y: e.clientY });
+                            } : undefined}
+                          >
+                            <UserAvatar
+                              className="m-voice__user-avatar"
+                              username={user.username}
+                              avatarUrl={
+                                user.username === username
+                                  ? (currentUserAvatarUrl ?? user.avatar_url ?? (avatarByUsername.get(user.username) as string | null))
+                                  : (user.avatar_url ?? (avatarByUsername.get(user.username) as string | null))
+                              }
+                              size={16}
+                              accentColor={usernameColor(user.username, theme)}
+                            />
+                            {user.username}
+                            {!isSelf && vol !== 1 && (
+                              <span className="m-voice__user-vol-badge">
+                                {Math.round(vol * 100)}%
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="m-voice__empty">No users in voice</div>
+                  )}
+
+                  {volMenu && (
+                    <>
+                      <div className="m-vol-backdrop" onClick={() => setVolMenu(null)} />
+                      <div
+                        className="m-vol-menu"
+                        style={{ left: volMenu.x, top: volMenu.y }}
+                        onClick={(e: { stopPropagation: () => void }) => e.stopPropagation()}
+                      >
+                        <div className="m-vol-menu__title">{volMenu.username}</div>
+                        <div className="m-vol-menu__row">
+                          <span className="m-vol-menu__icon">
+                            {(userVolumes[volMenu.username] ?? 1) === 0 ? "🔇" : "🔊"}
+                          </span>
+                          <input
+                            type="range"
+                            min={0}
+                            max={2}
+                            step={0.02}
+                            value={userVolumes[volMenu.username] ?? 1}
+                            className="m-vol-menu__slider"
+                            onChange={(e: { target: HTMLInputElement }) =>
+                              setUserVolume(volMenu.username, parseFloat(e.target.value))
+                            }
+                          />
+                          <span className="m-vol-menu__pct">
+                            {Math.round((userVolumes[volMenu.username] ?? 1) * 100)}%
+                          </span>
+                        </div>
+                      </div>
+                    </>
+                  )}
+
+                  <button className="m-debug-toggle" onClick={() => setShowDebug((p) => !p)}>
+                    {showDebug ? "hide logs" : "debug"}
+                  </button>
+
+                  {showDebug && (
+                    <div className="m-debug">
+                      {logs.length === 0 ? (
+                        <div style={{ opacity: 0.5 }}>No logs yet.</div>
+                      ) : (
+                        logs.map((line, i) => (
+                          <div className="m-debug__line" key={i}>
+                            <span className="m-debug__time">{line.t}</span> {line.msg}
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  )}
+                </>
               )}
-            </div>
-          )}
+          </div>
 
           <div className="m-voice__bottom">
-            <StreamPanel
-              expanded={expanded}
-              visible={showScreenSharePreview}
-              screenSharing={screenSharing}
-              remoteScreenShareCount={remoteScreenShareCount}
-              liveTakeoverActive={liveTakeoverActive}
-              onToggleTakeover={() => onToggleLiveTakeover?.(channelId)}
-              containerRef={screenShareContainerRef}
-            />
-
-            {expanded && (
-              <div className="m-voice__bottom-controls">
-                <div className="m-voice__controls">
-                  {joined ? (
-                    <>
-                      <button
-                        className="m-voice__btn m-voice__btn--leave"
-                        onClick={() => leave().catch(console.error)}
-                      >
-                        Leave
-                      </button>
+            <div className="m-voice__bottom-controls">
+              <div className="m-voice__controls">
+                {joined ? (
+                  <div className="m-voice__controls-stack">
+                    <button
+                      className="m-voice__btn m-voice__btn--leave"
+                      onClick={() => leave().catch(console.error)}
+                    >
+                      Disconnect
+                    </button>
+                    <div className="m-voice__controls-row">
                       <button
                         className={`m-voice__btn ${muted ? "m-voice__btn--muted" : "m-voice__btn--mute"}`}
                         onClick={toggleMute}
@@ -543,19 +814,33 @@ export function VoiceWidget({
                       >
                         {screenSharing ? "Stop" : "Share"}
                       </button>
-                    </>
-                  ) : (
-                    <button
-                      className="m-voice__btn m-voice__btn--join"
-                      onClick={() => join().catch(console.error)}
-                      disabled={connecting}
-                    >
-                      {connecting ? "Connecting..." : "Join Voice"}
-                    </button>
-                  )}
-                </div>
+                    </div>
+                  </div>
+                ) : canVoice ? (
+                  <button
+                    className="m-voice__btn m-voice__btn--join"
+                    onClick={() => join().catch(console.error)}
+                    disabled={connecting}
+                  >
+                    {connecting ? "Connecting..." : "Join voice"}
+                  </button>
+                ) : (
+                  <button className="m-voice__btn" disabled title="You do not have voice permission">
+                    Voice disabled
+                  </button>
+                )}
               </div>
-            )}
+            </div>
+
+            <StreamPanel
+              expanded={sidebarTab === "voice"}
+              visible={showScreenSharePreview}
+              screenSharing={screenSharing}
+              remoteScreenShareCount={remoteScreenShareCount}
+              liveTakeoverActive={liveTakeoverActive}
+              onToggleTakeover={() => onToggleLiveTakeover?.(channelId)}
+              containerRef={screenShareContainerRef}
+            />
 
             <div className="m-voice__meta">
               <div className="m-voice__status">
