@@ -1,6 +1,8 @@
 # Divergence
 
-A proof of concept for building my own Discord from scratch. This open-source, self-hostable chat application features real-time text messaging, voice channels, and screen sharing -- all built with modern web technologies.
+A self-hosted real-time communication platform inspired by Discord, built to explore **WebRTC, real-time networking, and scalable system architecture**.
+
+> Goal: develop transferable skills in **low-latency communication systems** applicable to XR and Unity environments.
 
 ## Demo
 
